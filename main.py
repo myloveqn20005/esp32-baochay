@@ -268,9 +268,6 @@ last_sheet_time = 0
 
 print(f"HỆ THỐNG BẮT ĐẦU CHẠY PHIÊN BẢN {CURRENT_VERSION}!")
 
-# --- THÊM 2 DÒNG NÀY: KÊU BÍP BÍP BÁO ĐÃ KHỞI ĐỘNG XONG ---
-buzzer.value(0); time.sleep(0.1); buzzer.value(1); time.sleep(0.1)
-buzzer.value(0); time.sleep(0.1); buzzer.value(1)
 
 if wlan_sta.isconnected():
     # --- SỬA LẠI NỘI DUNG GỬI NTFY ĐỂ BÁO RÕ PHIÊN BẢN ---
