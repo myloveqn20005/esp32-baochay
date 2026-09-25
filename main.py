@@ -1,4 +1,4 @@
-import machine, time, dht, json, network, socket, os
+import machine, time, dht, json, network, socket, os, esp32
 import gc 
 try:
     import urequests as requests
@@ -8,13 +8,13 @@ except ImportError:
 # ==========================================
 # 1. QUẢN LÝ PHIÊN BẢN & CẤU HÌNH
 # ==========================================
-CURRENT_VERSION = "1.1" 
+CURRENT_VERSION = "1.2"  # Đã nâng lên bản 1.2
 CONFIG_FILE = "config.json"
 
 # --- DÁN 3 ĐƯỜNG LINK CỦA BẠN VÀO ĐÂY ---
 GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbzorFwmW57CLc1QFI4lA6zA2G8R5MR8xILlMsNqJovmPsJxkMSive7HUjEngJOa-ueb/exec" 
-GITHUB_VERSION_URL = "https://raw.githubusercontent.com/myloveqn20005/esp32-baochay/refs/heads/main/version.txt"
-GITHUB_MAIN_URL = "https://raw.githubusercontent.com/myloveqn20005/esp32-baochay/refs/heads/main/main.py"
+GITHUB_VERSION_URL = "https://raw.githubusercontent.com/TenCuaBan/RepoCuaBan/main/version.txt"
+GITHUB_MAIN_URL = "https://raw.githubusercontent.com/TenCuaBan/RepoCuaBan/main/main.py"
 
 default_config = {
     "ssid": "",
@@ -138,7 +138,7 @@ def send_to_google_sheet(t, m2, m5):
 # ==========================================
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(('', 80)) # Dùng lại Port 80 cho dễ truy cập
+s.bind(('', 80)) 
 s.listen(5)
 s.setblocking(False)
 
@@ -161,6 +161,7 @@ def html_page():
         .btn-scan {background: #28a745; color: white; border: none; padding: 0 15px; border-radius: 4px; cursor: pointer; font-weight: bold;}
         .btn-fw {background: #2196f3; color: white; border: none; padding: 10px; cursor: pointer; width: 100%%; border-radius: 4px; font-weight: bold;}
         .btn-up {background: #4caf50; color: white; border: none; padding: 10px; cursor: pointer; width: 100%%; border-radius: 4px; font-weight: bold; display: none; margin-top: 10px;}
+        .sys-info {font-size: 13px; color: #4caf50; margin: 0; padding-top: 10px; text-align: center;}
     </style></head><body>
     
     <div class="card">
@@ -168,7 +169,13 @@ def html_page():
         <p>Nhiệt độ: <span class="stat" id="val_temp">%s °C</span></p>
         <p>Khói MQ-2: <span class="stat" id="val_mq2">%s</span></p>
         <p>Gas MQ-5: <span class="stat" id="val_mq5">%s</span></p>
-        <p style="font-size:10px; color:#aaa; text-align:right; margin:0;">(Tự động cập nhật trực tiếp...)</p>
+        
+        <hr style="border:0; border-top:1px solid #555; margin:15px 0;">
+        <p class="sys-info">
+            💻 CPU: <span id="v_cpu">-</span> MHz &nbsp;|&nbsp; 
+            🧠 RAM: <span id="v_ram">-</span> KB &nbsp;|&nbsp; 
+            🔥 Lõi: <span id="v_core">-</span> °C
+        </p>
     </div>
 
     <div class="card">
@@ -223,6 +230,11 @@ def html_page():
             document.getElementById('val_temp').innerText = data.t + ' °C';
             document.getElementById('val_mq2').innerText = data.m2;
             document.getElementById('val_mq5').innerText = data.m5;
+            
+            // Cập nhật thông số hệ thống
+            document.getElementById('v_cpu').innerText = data.cpu;
+            document.getElementById('v_ram').innerText = data.ram_f + '/' + data.ram_t;
+            document.getElementById('v_core').innerText = data.core;
         }).catch(e => {});
     }, 2000);
 
@@ -268,9 +280,11 @@ last_sheet_time = 0
 
 print(f"HỆ THỐNG BẮT ĐẦU CHẠY PHIÊN BẢN {CURRENT_VERSION}!")
 
+# Kêu còi báo hiệu khởi động xong
+buzzer.value(0); time.sleep(0.1); buzzer.value(1); time.sleep(0.1)
+buzzer.value(0); time.sleep(0.1); buzzer.value(1)
 
 if wlan_sta.isconnected():
-    # --- SỬA LẠI NỘI DUNG GỬI NTFY ĐỂ BÁO RÕ PHIÊN BẢN ---
     msg_boot = f"✅ Hệ thống khởi động thành công!\nPhiên bản: v{CURRENT_VERSION}\nLink Cài đặt: http://{current_ip}"
     send_ntfy_alert(msg_boot, is_alarm=False)
     
@@ -343,7 +357,6 @@ while True:
                 try:
                     params_str = request.split(' ')[1].split('?')[1]
                     params = params_str.split('&')
-                    # Thu gọn code lưu bằng vòng lặp
                     for param in params:
                         if '=' not in param: continue
                         key, val = param.split('=', 1)
@@ -353,7 +366,6 @@ while True:
                     
                     save_config(app_config)
                     
-                    # Trả về trang thông báo đẹp y hệt bản cũ
                     html_success = """HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n
                     <!DOCTYPE html><html><head><meta charset="utf-8">
                     <meta name='viewport' content='width=device-width, initial-scale=1'></head>
@@ -368,7 +380,7 @@ while True:
             
             # --- XỬ LÝ DÒ MẠNG WI-FI ---
             elif '/scan' in request:
-                gc.collect() # Dọn RAM trước khi dò mạng
+                gc.collect() 
                 try:
                     wlan_sta.active(True)
                     networks = wlan_sta.scan()
@@ -412,10 +424,22 @@ while True:
                 except Exception:
                     conn.send('HTTP/1.1 500 ERROR\r\n\r\n'.encode('utf-8'))
 
-            # --- AJAX LẤY THÔNG SỐ (2 GIÂY/LẦN) ---
+            # --- AJAX LẤY THÔNG SỐ (Bao gồm System Info) ---
             elif '/stats' in request:
                 try:
-                    stats_json = f'{{"t": {current_temp}, "m2": {current_mq2}, "m5": {current_mq5}}}'
+                    # Lấy cấu hình phần cứng
+                    cpu_mhz = machine.freq() // 1000000
+                    ram_free = gc.mem_free() // 1024
+                    ram_total = (gc.mem_free() + gc.mem_alloc()) // 1024
+                    
+                    # ESP32 đo bằng độ F, dùng công thức đổi sang độ C
+                    try:
+                        core_temp = round((esp32.raw_temperature() - 32) * 5/9, 1)
+                    except:
+                        core_temp = 0
+                        
+                    stats_json = f'{{"t": {current_temp}, "m2": {current_mq2}, "m5": {current_mq5}, "cpu": {cpu_mhz}, "ram_f": {ram_free}, "ram_t": {ram_total}, "core": {core_temp}}}'
+                    
                     conn.send('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n'.encode('utf-8'))
                     conn.send(stats_json.encode('utf-8'))
                 except Exception:
