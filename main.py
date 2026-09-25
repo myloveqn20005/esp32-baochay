@@ -8,7 +8,7 @@ except ImportError:
 # ==========================================
 # 1. QUẢN LÝ PHIÊN BẢN & CẤU HÌNH
 # ==========================================
-CURRENT_VERSION = "1.0" 
+CURRENT_VERSION = "1.1" 
 CONFIG_FILE = "config.json"
 
 # --- DÁN 3 ĐƯỜNG LINK CỦA BẠN VÀO ĐÂY ---
@@ -268,9 +268,16 @@ last_sheet_time = 0
 
 print(f"HỆ THỐNG BẮT ĐẦU CHẠY PHIÊN BẢN {CURRENT_VERSION}!")
 
+# --- THÊM 2 DÒNG NÀY: KÊU BÍP BÍP BÁO ĐÃ KHỞI ĐỘNG XONG ---
+buzzer.value(0); time.sleep(0.1); buzzer.value(1); time.sleep(0.1)
+buzzer.value(0); time.sleep(0.1); buzzer.value(1)
+
 if wlan_sta.isconnected():
+    # --- SỬA LẠI NỘI DUNG GỬI NTFY ĐỂ BÁO RÕ PHIÊN BẢN ---
+    msg_boot = f"✅ Hệ thống khởi động thành công!\nPhiên bản: v{CURRENT_VERSION}\nLink Cài đặt: http://{current_ip}"
+    send_ntfy_alert(msg_boot, is_alarm=False)
+    
     if current_ip != app_config['last_ip']:
-        send_ntfy_alert(f"Cập nhật IP Web Cài đặt:\nhttp://{current_ip}", is_alarm=False)
         app_config['last_ip'] = current_ip
         save_config(app_config)
 
