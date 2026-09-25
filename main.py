@@ -190,7 +190,7 @@ def html_page():
             <div id="wifi_result"></div>
             
             <label>Mật khẩu Wi-Fi:</label>
-            <input type="text" name="pw" value="%s">
+            <input type="password" name="pw" value="%s">
             <label>Blynk Token (Nếu dùng):</label>
             <input type="text" name="blynk" value="%s">
             <label>Ntfy Topic:</label>
