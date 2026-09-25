@@ -13,8 +13,8 @@ CONFIG_FILE = "config.json"
 
 # --- DÁN 3 ĐƯỜNG LINK CỦA BẠN VÀO ĐÂY ---
 GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbzorFwmW57CLc1QFI4lA6zA2G8R5MR8xILlMsNqJovmPsJxkMSive7HUjEngJOa-ueb/exec" 
-GITHUB_VERSION_URL = "https://raw.githubusercontent.com/TenCuaBan/RepoCuaBan/main/version.txt"
-GITHUB_MAIN_URL = "https://raw.githubusercontent.com/TenCuaBan/RepoCuaBan/main/main.py"
+GITHUB_VERSION_URL = "https://raw.githubusercontent.com/myloveqn20005/esp32-baochay/refs/heads/main/version.txt"
+GITHUB_MAIN_URL = "https://raw.githubusercontent.com/myloveqn20005/esp32-baochay/refs/heads/main/main.py"
 
 default_config = {
     "ssid": "",
