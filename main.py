@@ -8,7 +8,7 @@ except ImportError:
 # ==========================================
 # 1. QUẢN LÝ PHIÊN BẢN & CẤU HÌNH
 # ==========================================
-CURRENT_VERSION = "1.3"  # Đã nâng lên bản 1.3 - Bổ sung MQ2-2
+CURRENT_VERSION = "1.4"  # Bản 1.4 Tinh gọn - Bỏ OLED & Độ ẩm, Tối ưu RAM/CPU & URL Decode
 CONFIG_FILE = "config.json"
 
 # --- DÁN 3 ĐƯỜNG LINK CỦA BẠN VÀO ĐÂY ---
@@ -22,7 +22,7 @@ default_config = {
     "blynk_token": "",
     "ntfy_topic": "baodong_quan_minhanh",
     "mq2_nguong": 2000,
-    "mq2_2_nguong": 2000, # Thêm ngưỡng cho MQ2-2
+    "mq2_2_nguong": 2000,
     "mq5_nguong": 2000,
     "temp_nguong": 50,
     "last_ip": ""
@@ -45,9 +45,9 @@ def save_config(cfg):
 
 app_config = load_config()
 
-current_temp = 0
+current_temp = 0.0
 current_mq2 = 0
-current_mq2_2 = 0 # Biến mới lưu giá trị MQ2-2
+current_mq2_2 = 0
 current_mq5 = 0
 
 # ==========================================
@@ -60,20 +60,11 @@ dht_sensor = dht.DHT22(machine.Pin(18))
 mq2 = machine.ADC(machine.Pin(32))
 mq2.atten(machine.ADC.ATTN_11DB)
 
-# THÊM MQ2-2 VÀO CHÂN 34 (ADC1 chuyên đọc Analog tốt)
 mq2_2 = machine.ADC(machine.Pin(34))
 mq2_2.atten(machine.ADC.ATTN_11DB)
 
 mq5 = machine.ADC(machine.Pin(33))
 mq5.atten(machine.ADC.ATTN_11DB)
-
-try:
-    import sh1106
-    i2c = machine.I2C(scl=machine.Pin(22), sda=machine.Pin(21), freq=400000)
-    display = sh1106.SH1106_I2C(128, 64, i2c, machine.Pin(16), 0x3c)
-    has_oled = True
-except:
-    has_oled = False
 
 # ==========================================
 # 3. KẾT NỐI MẠNG (CÓ AP MODE DỰ PHÒNG)
@@ -112,8 +103,25 @@ def connect_wifi():
 current_ip = connect_wifi()
 
 # ==========================================
-# 4. HÀM GỬI THÔNG BÁO VÀ DỮ LIỆU
+# 4. HÀM CÔNG CỤ & GỬI THÔNG BÁO DỮ LIỆU
 # ==========================================
+def parse_url(s):
+    s = s.replace('+', ' ')
+    res = []
+    i = 0
+    n = len(s)
+    while i < n:
+        if s[i] == '%' and i + 2 < n:
+            try:
+                res.append(chr(int(s[i+1:i+3], 16)))
+                i += 3
+                continue
+            except Exception:
+                pass
+        res.append(s[i])
+        i += 1
+    return "".join(res)
+
 def send_ntfy_alert(msg, is_alarm=True):
     topic = app_config['ntfy_topic']
     if not topic or not wlan_sta.isconnected(): 
@@ -128,7 +136,6 @@ def send_ntfy_alert(msg, is_alarm=True):
     finally:
         gc.collect()
 
-# Cập nhật hàm gọi HTTP tới Sheet thêm tham số mq2_2
 def send_to_google_sheet(t, m2, m2_2, m5):
     if not wlan_sta.isconnected(): return
     try:
@@ -149,9 +156,6 @@ s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(('', 80)) 
 s.listen(5)
 s.setblocking(False)
-
-def parse_url(s):
-    return s.replace('+', ' ').replace('%2F', '/').replace('%3D', '=')
 
 def html_page():
     html = """<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -243,7 +247,6 @@ def html_page():
             document.getElementById('val_mq2_2').innerText = data.m2_2;
             document.getElementById('val_mq5').innerText = data.m5;
             
-            // Cập nhật thông số hệ thống
             document.getElementById('v_cpu').innerText = data.cpu;
             document.getElementById('v_ram').innerText = data.ram_f + '/' + data.ram_t;
             document.getElementById('v_core').innerText = data.core;
@@ -326,25 +329,15 @@ while True:
         last_read_time = current_time
         
         current_mq2 = mq2.read()
-        current_mq2_2 = mq2_2.read() # Đọc thêm MQ2-2
+        current_mq2_2 = mq2_2.read()
         current_mq5 = mq5.read()
         try:
             dht_sensor.measure()
             current_temp = dht_sensor.temperature()
-        except:
-            current_temp = 0
+        except Exception:
+            pass # Giữ lại giá trị cũ nếu bị lỗi ngắt nhịp đọc
             
-        if has_oled:
-            # Đã tối ưu lại dòng kẻ trên OLED để hiện đủ hết các thông số
-            display.fill(0)
-            display.text("GIAM SAT AN TOAN", 0, 0)
-            display.text(f"Nhiet: {current_temp} C", 0, 15)
-            display.text(f"M2:{current_mq2} M2-2:{current_mq2_2}", 0, 30)
-            display.text(f"Gas M5: {current_mq5}", 0, 45)
-            display.text(f"IP:{current_ip[-3:]} v{CURRENT_VERSION}", 0, 56)
-            display.show()
-            
-        # Thêm điều kiện cảnh báo cho MQ2-2
+        # Kiểm tra ngưỡng báo động
         if (current_mq2 > app_config['mq2_nguong'] or 
             current_mq2_2 > app_config['mq2_2_nguong'] or 
             current_mq5 > app_config['mq5_nguong'] or 
@@ -450,7 +443,7 @@ while True:
                     
                     try:
                         core_temp = round((esp32.raw_temperature() - 32) * 5/9, 1)
-                    except:
+                    except Exception:
                         core_temp = 0
                         
                     stats_json = f'{{"t": {current_temp}, "m2": {current_mq2}, "m2_2": {current_mq2_2}, "m5": {current_mq5}, "cpu": {cpu_mhz}, "ram_f": {ram_free}, "ram_t": {ram_total}, "core": {core_temp}}}'
