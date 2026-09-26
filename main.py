@@ -8,7 +8,7 @@ except ImportError:
 # ==========================================
 # 1. QUẢN LÝ PHIÊN BẢN & CẤU HÌNH
 # ==========================================
-CURRENT_VERSION = "1.5"   # v1.8: Bỏ Blynk để tiết kiệm RAM/CPU, giữ mọi fix của v1.7
+CURRENT_VERSION = "1.5"   # v1.5: Bỏ Blynk để tiết kiệm RAM/CPU, giữ mọi fix của v1.7
 CONFIG_FILE = "config.json"
 
 # --- DÁN 2 ĐƯỜNG LINK CỦA BẠN VÀO ĐÂY ---
