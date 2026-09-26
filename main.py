@@ -8,7 +8,7 @@ except ImportError:
 # ==========================================
 # 1. QUẢN LÝ PHIÊN BẢN & CẤU HÌNH
 # ==========================================
-CURRENT_VERSION = "1.4"  # Bản 1.4 Tinh gọn - Bỏ OLED & Độ ẩm, Tối ưu RAM/CPU & URL Decode
+CURRENT_VERSION = "1.5"  # Bản 1.5: Fix Google Sheets 302, Lọc nhiễu ADC, Blynk API, Auto Reconnect Wi-Fi
 CONFIG_FILE = "config.json"
 
 # --- DÁN 3 ĐƯỜNG LINK CỦA BẠN VÀO ĐÂY ---
@@ -33,15 +33,19 @@ def load_config():
         with open(CONFIG_FILE, 'r') as f:
             cfg = json.load(f)
             for k in default_config:
-                if k not in cfg: cfg[k] = default_config[k]
+                if k not in cfg: 
+                    cfg[k] = default_config[k]
             return cfg
     except Exception:
         save_config(default_config)
         return default_config
 
 def save_config(cfg):
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(cfg, f)
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(cfg, f)
+    except Exception as e:
+        print("Loi luu config:", e)
 
 app_config = load_config()
 
@@ -49,12 +53,13 @@ current_temp = 0.0
 current_mq2 = 0
 current_mq2_2 = 0
 current_mq5 = 0
+is_alarm_active = False
 
 # ==========================================
 # 2. KHỞI TẠO PHẦN CỨNG
 # ==========================================
 btn_reset = machine.Pin(0, machine.Pin.IN, machine.Pin.PULL_UP)
-buzzer = machine.Pin(19, machine.Pin.OUT, value=1)
+buzzer = machine.Pin(19, machine.Pin.OUT, value=1) # 1: Tat, 0: Bat (Active Low)
 dht_sensor = dht.DHT22(machine.Pin(18))
 
 mq2 = machine.ADC(machine.Pin(32))
@@ -66,8 +71,16 @@ mq2_2.atten(machine.ADC.ATTN_11DB)
 mq5 = machine.ADC(machine.Pin(33))
 mq5.atten(machine.ADC.ATTN_11DB)
 
+def read_adc_avg(adc_pin, samples=5):
+    """Đọc lọc lấy trung bình ADC để giảm nhiễu gai điện áp"""
+    total = 0
+    for _ in range(samples):
+        total += adc_pin.read()
+        time.sleep_ms(2)
+    return total // samples
+
 # ==========================================
-# 3. KẾT NỐI MẠNG (CÓ AP MODE DỰ PHÒNG)
+# 3. KẾT NỐI MẠNG (CÓ AP MODE DỰ PHÒNG & TỰ KHÔI PHỤC)
 # ==========================================
 wlan_sta = network.WLAN(network.STA_IF)
 wlan_ap = network.WLAN(network.AP_IF)
@@ -88,17 +101,26 @@ def connect_wifi():
     wlan_sta.active(True)
     wlan_sta.connect(app_config['ssid'], app_config['password'])
     
-    print(f"Dang ket noi: {app_config['ssid']} ...")
+    print(f"Dang ket noi Wi-Fi: {app_config['ssid']} ...")
     start_time = time.time()
     while not wlan_sta.isconnected():
         if time.time() - start_time > 15:
-            print("Ket noi that bai! Chuyen sang AP mode.")
+            print("Ket noi Wi-Fi that bai! Chuyen sang AP mode.")
             return setup_ap_mode()
         time.sleep(0.5)
         
     ip = wlan_sta.ifconfig()[0]
     print(f"-> Ket noi thanh cong! IP: {ip}")
     return ip
+
+def check_wifi_reconnect():
+    """Tự động kết nối lại Wi-Fi nếu rớt sóng trong lúc vận hành"""
+    if app_config['ssid'] and not wlan_sta.isconnected() and not wlan_ap.active():
+        try:
+            print("Wi-Fi bi ngat! Dang thu ket noi lai...")
+            wlan_sta.connect(app_config['ssid'], app_config['password'])
+        except Exception:
+            pass
 
 current_ip = connect_wifi()
 
@@ -127,21 +149,48 @@ def send_ntfy_alert(msg, is_alarm=True):
     if not topic or not wlan_sta.isconnected(): 
         return
     url = f"https://ntfy.sh/{topic}"
-    headers = {"Title": "BAO DONG KHAN CAP", "Priority": "5", "Tags": "rotating_light,fire"} if is_alarm else {"Title": "THONG BAO HE THONG", "Priority": "3", "Tags": "information_source"}
+    headers = {
+        "Title": "BAO DONG KHAN CAP" if is_alarm else "THONG BAO HE THONG",
+        "Priority": "5" if is_alarm else "3",
+        "Tags": "rotating_light,fire" if is_alarm else "white_check_mark,information_source"
+    }
     try:
         res = requests.post(url, data=msg.encode('utf-8'), headers=headers)
         res.close()
-    except Exception:
-        pass
+    except Exception as e:
+        print("Loi gui Ntfy:", e)
     finally:
         gc.collect()
 
 def send_to_google_sheet(t, m2, m2_2, m5):
-    if not wlan_sta.isconnected(): return
+    if not wlan_sta.isconnected(): 
+        return
     try:
         url = f"{GOOGLE_SHEET_URL}?temp={t}&mq2={m2}&mq2_2={m2_2}&mq5={m5}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers)
+        
+        # Xử lý HTTP 302 / 301 Redirect từ Google Apps Script
+        if res.status_code in (301, 302):
+            redirect_url = res.headers.get('Location') or res.headers.get('location')
+            res.close()
+            if redirect_url:
+                res = requests.get(redirect_url, headers=headers)
+        res.close()
+    except Exception as e:
+        print("Loi gui Google Sheets:", e)
+    finally:
+        gc.collect()
+
+def update_blynk():
+    """Gửi dữ liệu lên Blynk Cloud via Rest API (nếu khai báo Token)"""
+    token = app_config.get('blynk_token', '')
+    if not token or not wlan_sta.isconnected():
+        return
+    try:
+        # V0: Temp, V1: MQ2_1, V2: MQ2_2, V3: MQ5
+        url = f"http://blynk.cloud/external/api/update?token={token}&v0={current_temp}&v1={current_mq2}&v2={current_mq2_2}&v3={current_mq5}"
+        res = requests.get(url)
         res.close()
     except Exception:
         pass
@@ -158,32 +207,37 @@ s.listen(5)
 s.setblocking(False)
 
 def html_page():
+    status_text = "⚠️ BÁO ĐỘNG NGUY HIỂM" if is_alarm_active else "✅ MÔI TRƯỜNG AN TOÀN"
+    status_bg = "#d32f2f" if is_alarm_active else "#2e7d32"
+    
     html = """<!DOCTYPE html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>ESP32 Dashboard</title>
     <style>
-        body {font-family: Arial; padding: 10px; background: #222; color: #fff;}
-        .card {background: #333; padding: 20px; border-radius: 8px; max-width: 400px; margin: auto; margin-bottom: 20px;}
+        body {font-family: Arial, sans-serif; padding: 10px; background: #1a1a1a; color: #fff;}
+        .card {background: #2a2a2a; padding: 18px; border-radius: 10px; max-width: 420px; margin: auto; margin-bottom: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);}
+        .stat-box {display: flex; justify-content: space-between; align-items: center; margin: 10px 0; border-bottom: 1px solid #3d3d3d; padding-bottom: 6px;}
         .stat {font-size: 20px; font-weight: bold; color: #ffeb3b;}
-        input, select {width: 100%%; padding: 10px; margin: 8px 0; border-radius: 4px; box-sizing: border-box; border: none;}
-        input[type="submit"] {background: #e63946; color: white; font-weight: bold; font-size: 16px; cursor: pointer; margin-top: 15px;}
-        label {font-size: 12px; color: #aaa;}
-        .flex-row {display: flex; gap: 8px; margin: 8px 0;}
+        .status-badge {background: %s; color: white; padding: 10px; text-align: center; border-radius: 6px; font-weight: bold; font-size: 16px; margin-bottom: 15px;}
+        input, select {width: 100%%; padding: 10px; margin: 6px 0 12px 0; border-radius: 5px; box-sizing: border-box; border: 1px solid #444; background: #333; color: #fff;}
+        input[type="submit"] {background: #e63946; color: white; font-weight: bold; font-size: 16px; cursor: pointer; border: none; margin-top: 10px; padding: 12px;}
+        label {font-size: 13px; color: #bbb; font-weight: bold;}
+        .flex-row {display: flex; gap: 8px;}
         .flex-row input {margin: 0;}
-        .btn-scan {background: #28a745; color: white; border: none; padding: 0 15px; border-radius: 4px; cursor: pointer; font-weight: bold;}
-        .btn-fw {background: #2196f3; color: white; border: none; padding: 10px; cursor: pointer; width: 100%%; border-radius: 4px; font-weight: bold;}
-        .btn-up {background: #4caf50; color: white; border: none; padding: 10px; cursor: pointer; width: 100%%; border-radius: 4px; font-weight: bold; display: none; margin-top: 10px;}
-        .sys-info {font-size: 13px; color: #4caf50; margin: 0; padding-top: 10px; text-align: center;}
+        .btn-scan {background: #28a745; color: white; border: none; padding: 0 15px; border-radius: 5px; cursor: pointer; font-weight: bold;}
+        .btn-fw {background: #2196f3; color: white; border: none; padding: 10px; cursor: pointer; width: 100%%; border-radius: 5px; font-weight: bold;}
+        .btn-up {background: #4caf50; color: white; border: none; padding: 10px; cursor: pointer; width: 100%%; border-radius: 5px; font-weight: bold; display: none; margin-top: 10px;}
+        .sys-info {font-size: 13px; color: #81c784; margin: 10px 0 0 0; text-align: center;}
     </style></head><body>
     
     <div class="card">
-        <h2 style="margin-top:0;">THỐNG KÊ HIỆN TẠI</h2>
-        <p>Nhiệt độ: <span class="stat" id="val_temp">%s °C</span></p>
-        <p>Khói MQ-2 (1): <span class="stat" id="val_mq2">%s</span></p>
-        <p>Khói MQ-2 (2): <span class="stat" id="val_mq2_2">%s</span></p>
-        <p>Gas MQ-5: <span class="stat" id="val_mq5">%s</span></p>
+        <div class="status-badge" id="sys_status">%s</div>
+        <h3 style="margin-top:0; color:#4fc3f7;">THỐNG KÊ CẢM BIẾN</h3>
+        <div class="stat-box"><span>Nhiệt độ:</span><span class="stat" id="val_temp">%s °C</span></div>
+        <div class="stat-box"><span>Khói MQ-2 (1):</span><span class="stat" id="val_mq2">%s</span></div>
+        <div class="stat-box"><span>Khói MQ-2 (2):</span><span class="stat" id="val_mq2_2">%s</span></div>
+        <div class="stat-box"><span>Gas MQ-5:</span><span class="stat" id="val_mq5">%s</span></div>
         
-        <hr style="border:0; border-top:1px solid #555; margin:15px 0;">
         <p class="sys-info">
             💻 CPU: <span id="v_cpu">-</span> MHz &nbsp;|&nbsp; 
             🧠 RAM: <span id="v_ram">-</span> KB &nbsp;|&nbsp; 
@@ -192,15 +246,15 @@ def html_page():
     </div>
 
     <div class="card">
-        <h2 style="margin-top:0;">CẬP NHẬT PHẦN MỀM</h2>
-        <p>Bản hiện tại: <b>v%s</b></p>
+        <h3 style="margin-top:0; color:#4fc3f7;">CẬP NHẬT PHẦN MỀM</h3>
+        <p style="margin:5px 0 10px 0;">Bản hiện tại: <b>v%s</b></p>
         <button class="btn-fw" onclick="checkFW()">KIỂM TRA BẢN MỚI</button>
         <p id="fw_stt" style="font-size:13px; color:#aaa; margin-top:10px;"></p>
         <button id="btn_up" class="btn-up" onclick="doFW()">ĐỒNG Ý CẬP NHẬT CODE</button>
     </div>
 
     <div class="card">
-        <h2 style="margin-top:0;">CẤU HÌNH HỆ THỐNG</h2>
+        <h3 style="margin-top:0; color:#4fc3f7;">CẤU HÌNH HỆ THỐNG</h3>
         <form action="/save" method="GET">
             <label>Tên Wi-Fi:</label>
             <div class="flex-row">
@@ -216,14 +270,14 @@ def html_page():
             <label>Ntfy Topic:</label>
             <input type="text" name="ntfy_topic" value="%s">
             
-            <hr style="border:0; border-top:1px solid #555; margin:15px 0;">
-            <label>Ngưỡng báo Khói (MQ-2 1):</label>
+            <hr style="border:0; border-top:1px solid #444; margin:15px 0;">
+            <label>Ngưỡng Báo Khói (MQ-2 1):</label>
             <input type="number" name="mq2_nguong" value="%s">
-            <label>Ngưỡng báo Khói (MQ-2 2):</label>
+            <label>Ngưỡng Báo Khói (MQ-2 2):</label>
             <input type="number" name="mq2_2_nguong" value="%s">
-            <label>Ngưỡng báo Gas (MQ-5):</label>
+            <label>Ngưỡng Báo Gas (MQ-5):</label>
             <input type="number" name="mq5_nguong" value="%s">
-            <label>Ngưỡng báo Nhiệt độ (°C):</label>
+            <label>Ngưỡng Báo Nhiệt độ (°C):</label>
             <input type="number" name="temp_nguong" value="%s">
             <input type="submit" value="LƯU & KHỞI ĐỘNG LẠI">
         </form>
@@ -250,6 +304,15 @@ def html_page():
             document.getElementById('v_cpu').innerText = data.cpu;
             document.getElementById('v_ram').innerText = data.ram_f + '/' + data.ram_t;
             document.getElementById('v_core').innerText = data.core;
+
+            let badge = document.getElementById('sys_status');
+            if(data.alarm) {
+                badge.innerText = '⚠️ BÁO ĐỘNG NGUY HIỂM';
+                badge.style.background = '#d32f2f';
+            } else {
+                badge.innerText = '✅ MÔI TRƯỜNG AN TOÀN';
+                badge.style.background = '#2e7d32';
+            }
         }).catch(e => {});
     }, 2000);
 
@@ -276,6 +339,7 @@ def html_page():
     }
     </script>
     </body></html>""" % (
+        status_bg, status_text,
         current_temp, current_mq2, current_mq2_2, current_mq5,
         CURRENT_VERSION,
         app_config['ssid'], app_config['password'], 
@@ -292,15 +356,17 @@ last_read_time = 0
 btn_press_start = 0
 last_ntfy_time = 0 
 last_sheet_time = 0 
+last_blynk_time = 0
+last_wifi_check = 0
 
 print(f"HỆ THỐNG BẮT ĐẦU CHẠY PHIÊN BẢN {CURRENT_VERSION}!")
 
-# Kêu còi báo hiệu khởi động xong
+# Kêu còi báo hiệu khởi động xong (2 tiếng bip ngắn)
 buzzer.value(0); time.sleep(0.1); buzzer.value(1); time.sleep(0.1)
 buzzer.value(0); time.sleep(0.1); buzzer.value(1)
 
 if wlan_sta.isconnected():
-    msg_boot = f"✅ Hệ thống khởi động thành công!\nPhiên bản: v{CURRENT_VERSION}\nLink Cài đặt: http://{current_ip}"
+    msg_boot = f"✅ Hệ thống báo cháy đã khởi động thành công!\nPhiên bản: v{CURRENT_VERSION}\nLink Cài đặt: http://{current_ip}"
     send_ntfy_alert(msg_boot, is_alarm=False)
     
     if current_ip != app_config['last_ip']:
@@ -310,6 +376,11 @@ if wlan_sta.isconnected():
 while True:
     current_time = time.ticks_ms()
     
+    # ---- KIỂM TRA VÀ TỰ KẾT NỐI LẠI WI-FI (MỖI 15 GIÂY) ----
+    if time.ticks_diff(current_time, last_wifi_check) >= 15000:
+        last_wifi_check = current_time
+        check_wifi_reconnect()
+
     # ---- NÚT BOOT: NHẤN GIỮ 3 GIÂY ĐỂ RESET WI-FI ----
     if btn_reset.value() == 0:
         if btn_press_start == 0:
@@ -328,47 +399,76 @@ while True:
     if time.ticks_diff(current_time, last_read_time) >= 2000:
         last_read_time = current_time
         
-        current_mq2 = mq2.read()
-        current_mq2_2 = mq2_2.read()
-        current_mq5 = mq5.read()
+        # Đọc lọc lấy trung bình 5 mẫu để loại bỏ gai nhiễu
+        current_mq2 = read_adc_avg(mq2)
+        current_mq2_2 = read_adc_avg(mq2_2)
+        current_mq5 = read_adc_avg(mq5)
+        
         try:
             dht_sensor.measure()
             current_temp = dht_sensor.temperature()
         except Exception:
-            pass # Giữ lại giá trị cũ nếu bị lỗi ngắt nhịp đọc
+            pass # Giữ giá trị cũ nếu DHT22 lỗi nhịp đọc
             
         # Kiểm tra ngưỡng báo động
-        if (current_mq2 > app_config['mq2_nguong'] or 
-            current_mq2_2 > app_config['mq2_2_nguong'] or 
-            current_mq5 > app_config['mq5_nguong'] or 
-            current_temp > app_config['temp_nguong']):
+        exceed_mq2 = current_mq2 > app_config['mq2_nguong']
+        exceed_mq2_2 = current_mq2_2 > app_config['mq2_2_nguong']
+        exceed_mq5 = current_mq5 > app_config['mq5_nguong']
+        exceed_temp = current_temp > app_config['temp_nguong']
+        
+        if exceed_mq2 or exceed_mq2_2 or exceed_mq5 or exceed_temp:
+            buzzer.value(0) # Bật còi báo động
             
-            buzzer.value(0)
-            if time.ticks_diff(current_time, last_ntfy_time) > 60000:
-                msg = f"Phat hien vuot nguong an toan!\nNhiet: {current_temp}°C\nKhoi 1: {current_mq2}\nKhoi 2: {current_mq2_2}\nGas: {current_mq5}"
-                send_ntfy_alert(msg, True)
+            if not is_alarm_active:
+                is_alarm_active = True
+                msg = f"⚠️ BÁO ĐỘNG BẮT ĐẦU!\nNhiệt: {current_temp}°C\nKhói 1: {current_mq2}\nKhói 2: {current_mq2_2}\nGas: {current_mq5}"
+                send_ntfy_alert(msg, is_alarm=True)
+                last_ntfy_time = current_time
+            elif time.ticks_diff(current_time, last_ntfy_time) > 60000:
+                msg = f"🚨 BÁO ĐỘNG VẪN ĐANG TIẾP DIỄN!\nNhiệt: {current_temp}°C\nKhói 1: {current_mq2}\nKhói 2: {current_mq2_2}\nGas: {current_mq5}"
+                send_ntfy_alert(msg, is_alarm=True)
                 last_ntfy_time = current_time
         else:
-            buzzer.value(1)
+            buzzer.value(1) # Tắt còi
+            if is_alarm_active:
+                is_alarm_active = False
+                msg_rec = f"✅ HỆ THỐNG ĐÃ AN TOÀN TRỞ LẠI!\nNhiệt độ: {current_temp}°C\nCác chỉ số cảm biến đã về dưới ngưỡng an toàn."
+                send_ntfy_alert(msg_rec, is_alarm=False)
 
-    # ---- ĐẨY DỮ LIỆU LÊN GOOGLE SHEETS (MỖI 10 GIÂY) ----
-    if time.ticks_diff(current_time, last_sheet_time) >= 10000:
+    # ---- ĐẨY DỮ LIỆU LÊN GOOGLE SHEETS (MỖI 30 GIÂY) ----
+    if time.ticks_diff(current_time, last_sheet_time) >= 30000:
         last_sheet_time = current_time
         send_to_google_sheet(current_temp, current_mq2, current_mq2_2, current_mq5)
+
+    # ---- ĐẨY DỮ LIỆU LÊN BLYNK (MỖI 10 GIÂY) ----
+    if time.ticks_diff(current_time, last_blynk_time) >= 10000:
+        last_blynk_time = current_time
+        update_blynk()
 
     # ---- XỬ LÝ WEB SERVER ----
     try:
         conn, addr = s.accept()
         try:
-            request = conn.recv(1024).decode('utf-8')
+            req_data = conn.recv(1024)
+            if not req_data:
+                conn.close()
+                continue
+                
+            request = req_data.decode('utf-8')
+            if not request or ' ' not in request:
+                conn.close()
+                continue
+            
+            path = request.split(' ')[1]
             
             # --- XỬ LÝ LƯU CẤU HÌNH ---
-            if '/save?' in request:
+            if path.startswith('/save?'):
                 try:
-                    params_str = request.split(' ')[1].split('?')[1]
+                    params_str = path.split('?')[1]
                     params = params_str.split('&')
                     for param in params:
-                        if '=' not in param: continue
+                        if '=' not in param: 
+                            continue
                         key, val = param.split('=', 1)
                         val = parse_url(val)
                         if key in app_config:
@@ -376,20 +476,16 @@ while True:
                     
                     save_config(app_config)
                     
-                    html_success = """HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n
-                    <!DOCTYPE html><html><head><meta charset="utf-8">
-                    <meta name='viewport' content='width=device-width, initial-scale=1'></head>
-                    <body style='background:#222; color:#fff; text-align:center; padding-top:50px; font-family:Arial;'>
-                    <h1 style='color:#4caf50;'>ĐÃ LƯU THÀNH CÔNG!</h1><p>Hệ thống đang khởi động lại...</p></body></html>"""
+                    html_success = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:#1a1a1a; color:#fff; text-align:center; padding-top:50px; font-family:Arial;'><h1 style='color:#4caf50;'>ĐÃ LƯU CẤU HÌNH THÀNH CÔNG!</h1><p>Hệ thống đang khởi động lại...</p></body></html>"
                     
                     conn.send(html_success.encode('utf-8'))
                     time.sleep(2)
                     machine.reset() 
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("Loi /save:", e)
             
             # --- XỬ LÝ DÒ MẠNG WI-FI ---
-            elif '/scan' in request:
+            elif path.startswith('/scan'):
                 gc.collect() 
                 try:
                     wlan_sta.active(True)
@@ -401,41 +497,44 @@ while True:
                             ssids.append(ssid)
                     options = "".join([f"<option value='{s}'>{s}</option>" for s in ssids])
                     
-                    conn.send('HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n'.encode('utf-8'))
+                    conn.send('HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n'.encode('utf-8'))
                     conn.send(options.encode('utf-8'))
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("Loi /scan:", e)
             
             # --- OTA: KIỂM TRA PHIÊN BẢN ---
-            elif '/check_fw' in request:
+            elif path.startswith('/check_fw'):
                 gc.collect()
                 try:
                     res = requests.get(GITHUB_VERSION_URL)
                     git_ver = res.text.strip()
                     res.close()
-                    conn.send('HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n'.encode('utf-8'))
+                    conn.send('HTTP/1.1 200 OK\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n'.encode('utf-8'))
                     conn.send(git_ver.encode('utf-8'))
                 except Exception:
-                    conn.send('HTTP/1.1 500 ERROR\r\n\r\n'.encode('utf-8'))
+                    conn.send('HTTP/1.1 500 ERROR\r\nConnection: close\r\n\r\n'.encode('utf-8'))
                     
             # --- OTA: TẢI CODE MỚI VÀ CẬP NHẬT ---
-            elif '/do_fw' in request:
+            elif path.startswith('/do_fw'):
                 gc.collect()
                 try:
                     res = requests.get(GITHUB_MAIN_URL)
                     new_code = res.text
                     res.close()
                     if len(new_code) > 1000: 
-                        with open('main.py', 'w') as f: f.write(new_code)
+                        with open('main.py', 'w') as f: 
+                            f.write(new_code)
                         conn.send('HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK'.encode('utf-8'))
-                        time.sleep(2); machine.reset() 
+                        time.sleep(2)
+                        machine.reset() 
                     else:
-                        conn.send('HTTP/1.1 500 ERROR\r\n\r\n'.encode('utf-8'))
-                except Exception:
-                    conn.send('HTTP/1.1 500 ERROR\r\n\r\n'.encode('utf-8'))
+                        conn.send('HTTP/1.1 500 ERROR\r\nConnection: close\r\n\r\n. Code qua ngan'.encode('utf-8'))
+                except Exception as e:
+                    print("Loi OTA:", e)
+                    conn.send('HTTP/1.1 500 ERROR\r\nConnection: close\r\n\r\n'.encode('utf-8'))
 
-            # --- AJAX LẤY THÔNG SỐ (Bao gồm System Info & MQ2-2) ---
-            elif '/stats' in request:
+            # --- AJAX LẤY THÔNG SỐ (STATS) ---
+            elif path.startswith('/stats'):
                 try:
                     cpu_mhz = machine.freq() // 1000000
                     ram_free = gc.mem_free() // 1024
@@ -446,19 +545,19 @@ while True:
                     except Exception:
                         core_temp = 0
                         
-                    stats_json = f'{{"t": {current_temp}, "m2": {current_mq2}, "m2_2": {current_mq2_2}, "m5": {current_mq5}, "cpu": {cpu_mhz}, "ram_f": {ram_free}, "ram_t": {ram_total}, "core": {core_temp}}}'
+                    stats_json = f'{{"t": {current_temp}, "m2": {current_mq2}, "m2_2": {current_mq2_2}, "m5": {current_mq5}, "cpu": {cpu_mhz}, "ram_f": {ram_free}, "ram_t": {ram_total}, "core": {core_temp}, "alarm": {1 if is_alarm_active else 0}}}'
                     
-                    conn.send('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n'.encode('utf-8'))
+                    conn.send('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n'.encode('utf-8'))
                     conn.send(stats_json.encode('utf-8'))
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("Loi /stats:", e)
                     
             # --- TRẢ VỀ GIAO DIỆN CHÍNH ---
             else:
-                conn.send('HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n'.encode('utf-8'))
+                conn.send('HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n'.encode('utf-8'))
                 conn.send(html_page().encode('utf-8'))
                 
-        except Exception:
+        except Exception as e:
             pass
         finally:
             conn.close()
