@@ -8,13 +8,13 @@ except ImportError:
 # ==========================================
 # 1. QUẢN LÝ PHIÊN BẢN & CẤU HÌNH
 # ==========================================
-CURRENT_VERSION = "1.2"  # Đã nâng lên bản 1.2
+CURRENT_VERSION = "1.3"  # Đã nâng lên bản 1.3 - Bổ sung MQ2-2
 CONFIG_FILE = "config.json"
 
 # --- DÁN 3 ĐƯỜNG LINK CỦA BẠN VÀO ĐÂY ---
-GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbzorFwmW57CLc1QFI4lA6zA2G8R5MR8xILlMsNqJovmPsJxkMSive7HUjEngJOa-ueb/exec" 
-GITHUB_VERSION_URL = "https://raw.githubusercontent.com/TenCuaBan/RepoCuaBan/main/version.txt"
-GITHUB_MAIN_URL = "https://raw.githubusercontent.com/TenCuaBan/RepoCuaBan/main/main.py"
+GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbyKgWQszDQE1UxZFvAK67j5-P7Bz_nrk7QSVhACPvcR-eNSNsSEE-njsnmRt_TDzzueOw/exec" 
+GITHUB_VERSION_URL = "https://raw.githubusercontent.com/myloveqn20005/esp32-baochay/refs/heads/main/version.txt"
+GITHUB_MAIN_URL = "https://raw.githubusercontent.com/myloveqn20005/esp32-baochay/refs/heads/main/main.py"
 
 default_config = {
     "ssid": "",
@@ -22,6 +22,7 @@ default_config = {
     "blynk_token": "",
     "ntfy_topic": "baodong_quan_minhanh",
     "mq2_nguong": 2000,
+    "mq2_2_nguong": 2000, # Thêm ngưỡng cho MQ2-2
     "mq5_nguong": 2000,
     "temp_nguong": 50,
     "last_ip": ""
@@ -46,6 +47,7 @@ app_config = load_config()
 
 current_temp = 0
 current_mq2 = 0
+current_mq2_2 = 0 # Biến mới lưu giá trị MQ2-2
 current_mq5 = 0
 
 # ==========================================
@@ -57,6 +59,11 @@ dht_sensor = dht.DHT22(machine.Pin(18))
 
 mq2 = machine.ADC(machine.Pin(32))
 mq2.atten(machine.ADC.ATTN_11DB)
+
+# THÊM MQ2-2 VÀO CHÂN 34 (ADC1 chuyên đọc Analog tốt)
+mq2_2 = machine.ADC(machine.Pin(34))
+mq2_2.atten(machine.ADC.ATTN_11DB)
+
 mq5 = machine.ADC(machine.Pin(33))
 mq5.atten(machine.ADC.ATTN_11DB)
 
@@ -121,10 +128,11 @@ def send_ntfy_alert(msg, is_alarm=True):
     finally:
         gc.collect()
 
-def send_to_google_sheet(t, m2, m5):
+# Cập nhật hàm gọi HTTP tới Sheet thêm tham số mq2_2
+def send_to_google_sheet(t, m2, m2_2, m5):
     if not wlan_sta.isconnected(): return
     try:
-        url = f"{GOOGLE_SHEET_URL}?temp={t}&mq2={m2}&mq5={m5}"
+        url = f"{GOOGLE_SHEET_URL}?temp={t}&mq2={m2}&mq2_2={m2_2}&mq5={m5}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers)
         res.close()
@@ -167,7 +175,8 @@ def html_page():
     <div class="card">
         <h2 style="margin-top:0;">THỐNG KÊ HIỆN TẠI</h2>
         <p>Nhiệt độ: <span class="stat" id="val_temp">%s °C</span></p>
-        <p>Khói MQ-2: <span class="stat" id="val_mq2">%s</span></p>
+        <p>Khói MQ-2 (1): <span class="stat" id="val_mq2">%s</span></p>
+        <p>Khói MQ-2 (2): <span class="stat" id="val_mq2_2">%s</span></p>
         <p>Gas MQ-5: <span class="stat" id="val_mq5">%s</span></p>
         
         <hr style="border:0; border-top:1px solid #555; margin:15px 0;">
@@ -197,19 +206,21 @@ def html_page():
             <div id="wifi_result"></div>
             
             <label>Mật khẩu Wi-Fi:</label>
-            <input type="password" name="pw" value="%s">
+            <input type="password" name="password" value="%s">
             <label>Blynk Token (Nếu dùng):</label>
-            <input type="text" name="blynk" value="%s">
+            <input type="text" name="blynk_token" value="%s">
             <label>Ntfy Topic:</label>
-            <input type="text" name="ntfy" value="%s">
+            <input type="text" name="ntfy_topic" value="%s">
             
             <hr style="border:0; border-top:1px solid #555; margin:15px 0;">
-            <label>Ngưỡng báo Khói (MQ-2):</label>
-            <input type="number" name="mq2" value="%s">
+            <label>Ngưỡng báo Khói (MQ-2 1):</label>
+            <input type="number" name="mq2_nguong" value="%s">
+            <label>Ngưỡng báo Khói (MQ-2 2):</label>
+            <input type="number" name="mq2_2_nguong" value="%s">
             <label>Ngưỡng báo Gas (MQ-5):</label>
-            <input type="number" name="mq5" value="%s">
+            <input type="number" name="mq5_nguong" value="%s">
             <label>Ngưỡng báo Nhiệt độ (°C):</label>
-            <input type="number" name="temp" value="%s">
+            <input type="number" name="temp_nguong" value="%s">
             <input type="submit" value="LƯU & KHỞI ĐỘNG LẠI">
         </form>
     </div>
@@ -229,6 +240,7 @@ def html_page():
         fetch('/stats').then(r => r.json()).then(data => {
             document.getElementById('val_temp').innerText = data.t + ' °C';
             document.getElementById('val_mq2').innerText = data.m2;
+            document.getElementById('val_mq2_2').innerText = data.m2_2;
             document.getElementById('val_mq5').innerText = data.m5;
             
             // Cập nhật thông số hệ thống
@@ -242,7 +254,7 @@ def html_page():
         document.getElementById('fw_stt').innerText = "Đang kết nối GitHub...";
         fetch('/check_fw').then(r=>r.text()).then(v => {
             let ver = v.trim();
-            if(ver !== CURRENT_VER && ver !== '') {
+            if(parseFloat(ver) > parseFloat(CURRENT_VER)) {
                 document.getElementById('fw_stt').innerText = "Phát hiện bản mới: v" + ver + ". Bấm nút xanh để cài đặt!";
                 document.getElementById('btn_up').style.display = 'block';
             } else {
@@ -261,11 +273,11 @@ def html_page():
     }
     </script>
     </body></html>""" % (
-        current_temp, current_mq2, current_mq5,
+        current_temp, current_mq2, current_mq2_2, current_mq5,
         CURRENT_VERSION,
         app_config['ssid'], app_config['password'], 
         app_config['blynk_token'], app_config['ntfy_topic'],
-        app_config['mq2_nguong'], app_config['mq5_nguong'], app_config['temp_nguong'],
+        app_config['mq2_nguong'], app_config['mq2_2_nguong'], app_config['mq5_nguong'], app_config['temp_nguong'],
         CURRENT_VERSION
     )
     return html
@@ -314,6 +326,7 @@ while True:
         last_read_time = current_time
         
         current_mq2 = mq2.read()
+        current_mq2_2 = mq2_2.read() # Đọc thêm MQ2-2
         current_mq5 = mq5.read()
         try:
             dht_sensor.measure()
@@ -322,20 +335,24 @@ while True:
             current_temp = 0
             
         if has_oled:
+            # Đã tối ưu lại dòng kẻ trên OLED để hiện đủ hết các thông số
             display.fill(0)
             display.text("GIAM SAT AN TOAN", 0, 0)
-            display.text(f"Temp: {current_temp} C", 0, 20)
-            display.text(f"Khoi: {current_mq2}  Gas: {current_mq5}", 0, 35)
-            display.text(f"Ver: {CURRENT_VERSION} | IP:{current_ip[-3:]}", 0, 50)
+            display.text(f"Nhiet: {current_temp} C", 0, 15)
+            display.text(f"M2:{current_mq2} M2-2:{current_mq2_2}", 0, 30)
+            display.text(f"Gas M5: {current_mq5}", 0, 45)
+            display.text(f"IP:{current_ip[-3:]} v{CURRENT_VERSION}", 0, 56)
             display.show()
             
+        # Thêm điều kiện cảnh báo cho MQ2-2
         if (current_mq2 > app_config['mq2_nguong'] or 
+            current_mq2_2 > app_config['mq2_2_nguong'] or 
             current_mq5 > app_config['mq5_nguong'] or 
             current_temp > app_config['temp_nguong']):
             
             buzzer.value(0)
             if time.ticks_diff(current_time, last_ntfy_time) > 60000:
-                msg = f"Phat hien vuot nguong an toan!\nNhiet: {current_temp}°C\nKhoi: {current_mq2}\nGas: {current_mq5}"
+                msg = f"Phat hien vuot nguong an toan!\nNhiet: {current_temp}°C\nKhoi 1: {current_mq2}\nKhoi 2: {current_mq2_2}\nGas: {current_mq5}"
                 send_ntfy_alert(msg, True)
                 last_ntfy_time = current_time
         else:
@@ -344,7 +361,7 @@ while True:
     # ---- ĐẨY DỮ LIỆU LÊN GOOGLE SHEETS (MỖI 10 GIÂY) ----
     if time.ticks_diff(current_time, last_sheet_time) >= 10000:
         last_sheet_time = current_time
-        send_to_google_sheet(current_temp, current_mq2, current_mq5)
+        send_to_google_sheet(current_temp, current_mq2, current_mq2_2, current_mq5)
 
     # ---- XỬ LÝ WEB SERVER ----
     try:
@@ -424,21 +441,19 @@ while True:
                 except Exception:
                     conn.send('HTTP/1.1 500 ERROR\r\n\r\n'.encode('utf-8'))
 
-            # --- AJAX LẤY THÔNG SỐ (Bao gồm System Info) ---
+            # --- AJAX LẤY THÔNG SỐ (Bao gồm System Info & MQ2-2) ---
             elif '/stats' in request:
                 try:
-                    # Lấy cấu hình phần cứng
                     cpu_mhz = machine.freq() // 1000000
                     ram_free = gc.mem_free() // 1024
                     ram_total = (gc.mem_free() + gc.mem_alloc()) // 1024
                     
-                    # ESP32 đo bằng độ F, dùng công thức đổi sang độ C
                     try:
                         core_temp = round((esp32.raw_temperature() - 32) * 5/9, 1)
                     except:
                         core_temp = 0
                         
-                    stats_json = f'{{"t": {current_temp}, "m2": {current_mq2}, "m5": {current_mq5}, "cpu": {cpu_mhz}, "ram_f": {ram_free}, "ram_t": {ram_total}, "core": {core_temp}}}'
+                    stats_json = f'{{"t": {current_temp}, "m2": {current_mq2}, "m2_2": {current_mq2_2}, "m5": {current_mq5}, "cpu": {cpu_mhz}, "ram_f": {ram_free}, "ram_t": {ram_total}, "core": {core_temp}}}'
                     
                     conn.send('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n'.encode('utf-8'))
                     conn.send(stats_json.encode('utf-8'))
